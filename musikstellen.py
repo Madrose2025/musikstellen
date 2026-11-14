@@ -19,31 +19,32 @@ from urllib.parse import urljoin
 from html.parser import HTMLParser
 from email.message import EmailMessage
 
-# (Name, Stellenseite, optional: alle Links zeigen statt nur Musik-Treffer)
+# (Name, Startseite oder direkte Stellenseite). Das Skript sucht auf der Startseite
+# selbst nach Links wie "Stellen", "Jobs", "Offene Stellen", "Karriere".
 SOURCES = [
-    # Musikhochschulen CH (deutschsprachig)
-    ("ZHdK", "https://www.zhdk.ch/stellen"),
-    ("HKB / BFH", "https://www.bfh.ch/de/ueber-die-bfh/jobs/"),
-    ("HSLU Musik", "https://www.hslu.ch/de-ch/hochschule-luzern/ueber-uns/jobs-und-karriere/"),
-    ("FHNW Musik-Akademie Basel", "https://www.fhnw.ch/de/die-fhnw/jobs"),
-    ("Hochschule der Künste / SUPSI-Umfeld, Konsi", "https://www.fhnw.ch/de/die-fhnw/jobs"),
+    # Musikhochschulen CH
+    ("ZHdK", "https://www.zhdk.ch/jobs"),
+    ("HKB / BFH", "https://www.bfh.ch"),
+    ("HSLU", "https://www.hslu.ch"),
+    ("FHNW (Musik-Akademie Basel + PH FHNW)", "https://www.fhnw.ch"),
     # Pädagogische Hochschulen CH (deutschsprachig)
-    ("PH Zürich", "https://phzh.ch/de/ueber-uns/arbeiten-an-der-phzh/offene-stellen/"),
-    ("PH Bern", "https://www.phbern.ch/ueber-die-ph-bern/offene-stellen"),
-    ("PH Luzern", "https://www.phlu.ch/ueber-uns/stellen.html"),
-    ("PH FHNW", "https://www.fhnw.ch/de/die-fhnw/jobs"),
-    ("PH St.Gallen", "https://www.phsg.ch/de/ueber-uns/arbeiten-an-der-phsg"),
-    ("PH Thurgau", "https://www.phtg.ch/ueber-uns/offene-stellen/"),
-    ("PH Schwyz", "https://www.phsz.ch/ueber-uns/offene-stellen"),
-    ("PH Zug", "https://phzg.ch/ueber-uns/offene-stellen"),
-    ("PH Schaffhausen", "https://www.phsh.ch/ueber-uns/offene-stellen"),
-    ("PH Graubünden", "https://www.phgr.ch/ueber-uns/stellen"),
-    ("PH Wallis (dt.)", "https://www.hepvs.ch/de/ueber-uns/offene-stellen"),
+    ("PH Zürich", "https://phzh.ch"),
+    ("PH Bern", "https://www.phbern.ch"),
+    ("PH Luzern", "https://www.phlu.ch"),
+    ("PH St.Gallen", "https://www.phsg.ch"),
+    ("PH Thurgau", "https://www.phtg.ch"),
+    ("PH Schwyz", "https://www.phsz.ch"),
+    ("PH Zug", "https://www.phzg.ch"),
+    ("PH Schaffhausen", "https://www.phsh.ch"),
+    ("PH Graubünden", "https://www.phgr.ch"),
+    ("PH Wallis (dt.)", "https://www.hepvs.ch"),
     # Ausland
-    ("HfM Trossingen", "https://www.mh-trossingen.de/hochschule/stellenangebote"),
-    ("Stella Vorarlberg", "https://www.stella.ac.at/jobs"),
-    ("WIAM", "https://www.wiam.ch"),  # ggf. durch die direkte Stellen-/Jobs-Unterseite ersetzen
+    ("HfM Trossingen", "https://www.mh-trossingen.de"),
+    ("Stella Vorarlberg", "https://www.stella-musikhochschule.ac.at"),
+    ("WIAM", "https://www.wiam.ch"),
 ]
+
+JOB_RE = re.compile(r"stellen|\bjobs?\b|karriere|career|offene|vacanc|ausschreibung", re.I)
 
 KEYWORDS = re.compile(
     r"musik|gesang|stimme|klavier|violin|viola|cello|kontrabass|gitarre|harfe|"
@@ -77,34 +78,84 @@ class Links(HTMLParser):
             self._href = None
 
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "de-CH,de;q=0.9,en;q=0.5",
+}
+
+
 def fetch(url):
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Musikstellen-Monitor)"})
-    with urlopen(req, timeout=30, context=ssl.create_default_context()) as r:
+    req = Request(url, headers=HEADERS)
+    try:
+        ctx = ssl.create_default_context()
+        r = urlopen(req, timeout=30, context=ctx)
+    except ssl.SSLError:  # fehlerhaftes Zertifikat: öffentliche Seite trotzdem lesen
+        r = urlopen(req, timeout=30, context=ssl._create_unverified_context())
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+        r = urlopen(req, timeout=30, context=ssl._create_unverified_context())
+    with r:
         return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
+
+
+def get_links(url):
+    p = Links()
+    p.feed(fetch(url))
+    out = []
+    for href, text in p.links:
+        if href.startswith(("#", "mailto:", "javascript:", "tel:")):
+            continue
+        out.append((urljoin(url, href), text))
+    return out
 
 
 def scan():
     found, errors = {}, []
-    for name, url in SOURCES:
+    for name, start in SOURCES:
         try:
-            p = Links()
-            p.feed(fetch(url))
-            for href, text in p.links:
-                if len(text) < 8 or href.startswith(("#", "mailto:", "javascript:")):
+            links = get_links(start)
+            # Stellenseiten finden (Startseite selbst zählt, wenn sie schon eine ist)
+            pages = [start] if JOB_RE.search(start) else []
+            for full, text in links:
+                if JOB_RE.search(text) and 3 <= len(text) <= 40 and full not in pages:
+                    pages.append(full)
+                if len(pages) >= 4:
+                    break
+            if not pages:
+                errors.append(f"{name}: keine Stellenseite gefunden – bitte direkte URL in SOURCES eintragen")
+                continue
+            for page in pages:
+                try:
+                    page_links = links if page == start else get_links(page)
+                except Exception as e:
+                    errors.append(f"{name} ({page}): {e}")
                     continue
-                full = urljoin(url, href)
-                if KEYWORDS.search(text) or KEYWORDS.search(full):
-                    key = hashlib.sha1(full.encode()).hexdigest()[:16]
-                    found[key] = {"source": name, "title": text, "url": full}
+                for full, text in page_links:
+                    text = " ".join(text.split())
+                    if len(text) < 8:
+                        continue
+                    if KEYWORDS.search(text) or KEYWORDS.search(full):
+                        key = hashlib.sha1(full.encode()).hexdigest()[:16]
+                        found[key] = {"source": name, "title": text, "url": full}
         except Exception as e:  # eine kaputte Seite stoppt nicht alles
             errors.append(f"{name}: {e}")
     return found, errors
 
 
+def recent(v, days=14):
+    try:
+        d = datetime.datetime.strptime(v.get("first_seen", ""), "%d.%m.%Y").date()
+        return (datetime.date.today() - d).days <= days
+    except ValueError:
+        return False  # z. B. "Ausgangsstand"
+
+
 def render(items, new_keys, errors):
     rows = ""
-    for k, v in sorted(items.items(), key=lambda kv: (kv[0] not in new_keys, kv[1]["source"])):
-        badge = "<b style='color:#c00'>NEU</b> " if k in new_keys else ""
+    for k, v in sorted(items.items(), key=lambda kv: (not recent(kv[1]), kv[1]["source"])):
+        badge = "<b style='color:#c00'>NEU</b> " if recent(v) else ""
         rows += (f"<tr><td>{html.escape(v['source'])}</td><td>{badge}"
                  f"<a href='{html.escape(v['url'])}'>{html.escape(v['title'])}</a></td>"
                  f"<td>{v.get('first_seen','')}</td></tr>")
@@ -142,7 +193,7 @@ def main():
     seen = seen or {}
     new_keys = {k for k in found if k not in seen}
     for k in new_keys:
-        seen[k] = {**found[k], "first_seen": today}
+        seen[k] = {**found[k], "first_seen": "Ausgangsstand" if first_run else today}
     current = {k: seen[k] for k in found}
     json.dump(seen, open(STATE, "w"), ensure_ascii=False, indent=1)
     open(OUT, "w", encoding="utf-8").write(
