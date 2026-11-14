@@ -40,7 +40,7 @@ SOURCES = [
     ("PH Wallis (dt.)", "https://www.hepvs.ch"),
     # Ausland
     ("HfM Trossingen", "https://www.mh-trossingen.de"),
-    ("Stella Vorarlberg", "https://www.stella-musikhochschule.ac.at"),
+    ("Stella Vorarlberg", "hhttps://stella-musikhochschule.ac.at/ueber-uns/karriere-bei-stella"),
     ("WIAM", "https://www.wiam.ch"),
 ]
 
